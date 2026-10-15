@@ -15,11 +15,15 @@ user32 = ctypes.windll.user32
 def move_mouse(x, y):
     user32.SetCursorPos(int(x), int(y))
 
+def left_click():
+    user32.mouse_event(0x0002, 0, 0, 0, 0)  # MOUSEEVENTF_LEFTDOWN
+    user32.mouse_event(0x0004, 0, 0, 0, 0)  # MOUSEEVENTF_LEFTUP
+
 def mouse_down():
     user32.mouse_event(0x0002, 0, 0, 0, 0)  # MOUSEEVENTF_LEFTDOWN
 
 def mouse_up():
-    user32.mouse_event(0x0004, 0, 0, 0, 0)    # MOUSEEVENTF_LEFTUP
+    user32.mouse_event(0x0004, 0, 0, 0, 0)  # MOUSEEVENTF_LEFTUP
 
 def right_click():
     user32.mouse_event(0x0008, 0, 0, 0, 0)  # MOUSEEVENTF_RIGHTDOWN
@@ -31,18 +35,17 @@ def right_click():
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 MODEL_PATH = os.path.join(BASE_DIR, "hand_landmarker.task")
 SHOW_PREVIEW = True  # Set to True to display camera feed with tracking visuals
+WINDOW_NAME = "AirGlide - Touchless Cursor Navigation (ESC/Q to exit)"
 
 CAM_W, CAM_H = 640, 360
 DEADZONE = 2
-EDGE_PADDING = 30
 
-PINCH_DIST = 42
-PINCH_FRAMES = 1     # Instant click/drag response
-COOLDOWN = 0.4
-FRAME_SKIP = 1       # Process every frame for maximum smoothness
+# Gesture Configuration
+PINCH_DIST = 40      # Distance in pixels between thumb and index to trigger Drag & Drop
+COOLDOWN = 0.35      # Seconds cooldown between discrete actions
 
 fist_start_time = None
-FIST_HOLD_TIME = 2.5  # seconds
+FIST_HOLD_TIME = 2.5 # Seconds required to hold fist to trigger Alt+F4
 
 # ==========================
 pyautogui.FAILSAFE = False
@@ -105,10 +108,23 @@ cap.set(cv2.CAP_PROP_FRAME_WIDTH, CAM_W)
 cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CAM_H)
 cap.set(cv2.CAP_PROP_FPS, 30)
 
+# ==========================
+# GUI Window & Controls
+# ==========================
+if SHOW_PREVIEW:
+    cv2.namedWindow(WINDOW_NAME, cv2.WINDOW_AUTOSIZE)
+    # Sensitivity drag bar: 1 to 100 (default 50)
+    cv2.createTrackbar("Sensitivity", WINDOW_NAME, 50, 100, lambda x: None)
+    # Deadzone drag bar: 1 to 10 (default 2)
+    cv2.createTrackbar("Deadzone", WINDOW_NAME, 2, 10, lambda x: None)
+
 prev_x, prev_y = screen_w // 2, screen_h // 2
 last_action = 0
 dragging = False
-pinch_count = 0
+pinch_start_time = None
+air_click_down = False
+action_status = "Ready"
+status_display_until = 0
 start_time = time.time()
 
 # ==========================
@@ -148,6 +164,27 @@ while True:
     frame = cv2.flip(frame, 1)
     h, w, _ = frame.shape
 
+    # Read live values from GUI drag bars
+    if SHOW_PREVIEW:
+        sens_pos = cv2.getTrackbarPos("Sensitivity", WINDOW_NAME)
+        sens_val = max(1, sens_pos)
+        deadzone_val = max(1, cv2.getTrackbarPos("Deadzone", WINDOW_NAME))
+    else:
+        sens_val = 50
+        deadzone_val = DEADZONE
+
+    # Calculate active zone margins dynamically from Sensitivity slider:
+    # sens_val = 1   -> margin_x = 50,  margin_y = 30  (Low sens / wide hand movement)
+    # sens_val = 50  -> margin_x = 135, margin_y = 80  (Balanced default)
+    # sens_val = 100 -> margin_x = 220, margin_y = 130 (High sens / minimal hand movement)
+    margin_x = int(50 + (sens_val / 100.0) * 170)
+    margin_y = int(30 + (sens_val / 100.0) * 100)
+
+    # Draw active tracking zone (helps user know hand boundaries)
+    if SHOW_PREVIEW:
+        cv2.rectangle(frame, (margin_x, margin_y), (w - margin_x, h - margin_y), (0, 220, 100), 1)
+        cv2.putText(frame, f"Active Zone [Sens: {sens_val}%]", (margin_x + 6, margin_y + 16), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (0, 220, 100), 1)
+
     rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
     mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
 
@@ -161,17 +198,12 @@ while True:
         # ----- CURSOR (PALM)
         palm_x, palm_y = palm_center(lm, w, h)
 
-        sx = map_range(palm_x, EDGE_PADDING, w - EDGE_PADDING, 0, screen_w)
-        sy = map_range(palm_y, EDGE_PADDING, h - EDGE_PADDING, 0, screen_h)
+        # Dynamic sensitivity mapping via active central zone
+        sx = map_range(palm_x, margin_x, w - margin_x, 0, screen_w)
+        sy = map_range(palm_y, margin_y, h - margin_y, 0, screen_h)
 
         dx, dy = sx - prev_x, sy - prev_y
         dist_moved = math.hypot(dx, dy)
-        if dist_moved > DEADZONE:
-            # Dynamic responsiveness: adapts smoothing to movement speed
-            alpha = min(0.85, max(0.45, dist_moved / 80.0))
-            prev_x += dx * alpha
-            prev_y += dy * alpha
-            move_mouse(prev_x, prev_y)
 
         def pt(i): return (int(lm[i].x * w), int(lm[i].y * h))
         index, thumb = pt(8), pt(4)
@@ -183,56 +215,113 @@ while True:
             "pinky": finger_up(lm, 20, 18)
         }
 
-        # ----- LEFT CLICK / DRAG (FAST RESPONSE)
-        if dist(index, thumb) < PINCH_DIST:
-            pinch_count += 1
-            if pinch_count >= PINCH_FRAMES and not dragging:
+        # ---------------------------------------------
+        # 1. DRAG & DROP (PINCH THUMB + INDEX)
+        # ---------------------------------------------
+        is_pinched = dist(index, thumb) < PINCH_DIST
+
+        if is_pinched:
+            if not dragging:
                 mouse_down()
                 dragging = True
+                action_status = "Dragging"
+                status_display_until = time.time() + 0.6
         else:
-            pinch_count = 0
             if dragging:
                 mouse_up()
                 dragging = False
+                action_status = "Drag Released"
+                status_display_until = time.time() + 0.6
 
-        # ----- RIGHT CLICK
-        if fingers["index"] and not any([fingers["middle"], fingers["ring"], fingers["pinky"]]) and cooldown():
+        # ---------------------------------------------
+        # 2. LEFT CLICK: AIR TAP
+        # (Bend index finger down like a real mouse button)
+        # ---------------------------------------------
+        index_bent = not fingers["index"]
+        others_up = fingers["middle"] and fingers["ring"]
+        air_click_gesture = index_bent and others_up and (not is_pinched)
+
+        if air_click_gesture:
+            if not air_click_down:
+                air_click_down = True
+                if cooldown():
+                    left_click()
+                    action_status = "Left Click!"
+                    status_display_until = time.time() + 0.6
+        else:
+            air_click_down = False
+
+        # ---------------------------------------------
+        # 3. CURSOR MOVEMENT
+        # ---------------------------------------------
+        if dist_moved > deadzone_val:
+            alpha = min(0.85, max(0.45, dist_moved / 80.0))
+            prev_x += dx * alpha
+            prev_y += dy * alpha
+            move_mouse(prev_x, prev_y)
+
+        # ---------------------------------------------
+        # 4. OTHER GESTURES
+        # ---------------------------------------------
+        # ----- RIGHT CLICK (Index finger pointing up only)
+        if fingers["index"] and not any([fingers["middle"], fingers["ring"], fingers["pinky"]]) and (not is_pinched) and cooldown():
             right_click()
+            action_status = "Right Click"
+            status_display_until = time.time() + 0.6
 
-        # ----- START MENU
+        # ----- START MENU (Ring finger up only)
         if fingers["ring"] and not any([fingers["index"], fingers["middle"], fingers["pinky"]]) and cooldown():
             pyautogui.press("win")
+            action_status = "Start Menu"
+            status_display_until = time.time() + 0.6
 
-        # ----- ALT + F4
-        if not any(fingers.values()):  # fist detected
+        # ----- ALT + F4 (Closed fist held for 2.5s)
+        if not any(fingers.values()) and not is_pinched:
             if fist_start_time is None:
                 fist_start_time = time.time()
             elif time.time() - fist_start_time >= FIST_HOLD_TIME:
                 pyautogui.hotkey("alt", "f4")
-                fist_start_time = None  # reset after trigger
+                action_status = "Alt + F4 Triggered"
+                status_display_until = time.time() + 1.0
+                fist_start_time = None
         else:
             fist_start_time = None
 
         # Visual feedback on frame if preview is enabled
         if SHOW_PREVIEW:
-            cv2.circle(frame, (palm_x, palm_y), 8, (0, 255, 0), -1)  # Palm center
-            cv2.circle(frame, index, 6, (255, 0, 0), -1)              # Index tip
-            cv2.circle(frame, thumb, 6, (0, 0, 255), -1)              # Thumb tip
-            cv2.line(frame, index, thumb, (255, 255, 0), 2)           # Pinch indicator
-            state_text = f"Drag: {'ON' if dragging else 'OFF'} | Pinch: {dist(index, thumb):.0f}"
-            cv2.putText(frame, state_text, (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+            cv2.circle(frame, (palm_x, palm_y), 8, (0, 255, 0), -1)   # Palm centroid
+            cv2.circle(frame, index, 6, (255, 0, 0), -1)               # Index tip
+            cv2.circle(frame, thumb, 6, (0, 0, 255), -1)               # Thumb tip
+            pinch_color = (0, 255, 255) if is_pinched else (255, 255, 0)
+            cv2.line(frame, index, thumb, pinch_color, 2)              # Pinch line
+
+            # Status overlay
+            if time.time() < status_display_until:
+                curr_status = action_status
+            elif dragging:
+                curr_status = "Dragging"
+            elif is_pinched:
+                curr_status = "Pinch (Dragging)"
+            elif air_click_down:
+                curr_status = "Air Click"
+            else:
+                curr_status = "Tracking"
+
+            cv2.putText(frame, f"State: {curr_status}", (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+            cv2.putText(frame, f"Pinch: {dist(index, thumb):.0f}px", (10, 52), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (220, 220, 220), 1)
+
             if fist_start_time is not None:
                 remaining = max(0.0, FIST_HOLD_TIME - (time.time() - fist_start_time))
-                cv2.putText(frame, f"Fist hold: {remaining:.1f}s", (10, 55), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+                cv2.putText(frame, f"Fist hold: {remaining:.1f}s", (10, 78), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
 
     if SHOW_PREVIEW:
-        cv2.imshow("DarshAI Cursor Navigation (Press ESC or Q to quit)", frame)
+        cv2.imshow(WINDOW_NAME, frame)
         key = cv2.waitKey(1) & 0xFF
         if key == 27 or key == ord('q'):
             print("[INFO] Exit requested by user.")
             break
         # Handle clicking window close 'X' button
-        if cv2.getWindowProperty("DarshAI Cursor Navigation (Press ESC or Q to quit)", cv2.WND_PROP_VISIBLE) < 1:
+        if cv2.getWindowProperty(WINDOW_NAME, cv2.WND_PROP_VISIBLE) < 1:
             print("[INFO] Preview window closed.")
             break
     else:

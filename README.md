@@ -1,16 +1,19 @@
-# DarshAI Hand Gesture Cursor Navigation
+# AirGlide — Touchless AI Cursor Navigation
 
-A low-latency, real-time AI hand-gesture cursor navigation and desktop control system powered by **Google MediaPipe Tasks API** and **OpenCV**, designed with direct Windows API integration for zero-delay mouse control.
+A low-latency, real-time AI hand-gesture cursor navigation and desktop control system powered by **Google MediaPipe Tasks API** and **OpenCV**, designed with direct Windows Native API integration for zero-delay mouse control.
 
 ---
 
 ## Features
 
 - **Ultra-Low Latency Mouse Control**: Uses direct Windows Native API calls (`ctypes.windll.user32.SetCursorPos` and `mouse_event`) rather than high-overhead wrappers.
+- **High Sensitivity Active Zone**: Maps a comfortable central camera box to the entire display so you can reach all four screen corners effortlessly without your hand dropping off the camera frame.
+- **Pinch Click vs. Hold-to-Drag**: Quick pinch & release triggers a clean single click; holding the pinch for > 0.3s converts to smooth drag-and-drop.
+- **Fatigue-Free "Air Click"**: Simply tap/bend your index finger down like clicking a real mouse button — no thumb pinching strain required!
 - **Dynamic Velocity-Adaptive Smoothing**: Adapts cursor speed dynamically — fast hand movements track instantly for quick navigation, while slow motions are smoothed to eliminate hand tremors and jitter.
 - **Buffer-Lag Free Video Pipeline**: Camera frame buffer is capped to 1 to eliminate internal video queue delays.
 - **Camera Auto-Detection**: Automatically detects active webcams (indices `0` and `1`) with DirectShow (`CAP_DSHOW`) and fallback backends.
-- **Visual Feedback HUD**: Displays tracking points (palm center, fingertips, pinch distance, drag status, and fist countdown) on screen.
+- **Visual Feedback HUD**: Displays active zone borders, palm centroid, pinch distance, real-time action states, and fist countdown.
 - **Clean Exit Support**: Close easily using <kbd>ESC</kbd>, <kbd>Q</kbd>, or clicking the window close (`X`) button.
 
 ---
@@ -19,9 +22,10 @@ A low-latency, real-time AI hand-gesture cursor navigation and desktop control s
 
 | Gesture | Action | Description |
 | :--- | :--- | :--- |
-| **Open Palm Movement** | **Move Cursor** | The palm centroid controls the cursor position with edge padding. |
-| **Index + Thumb Pinch** | **Left Click & Drag** | Pinch index fingertip and thumb tip together to click; hold pinch to drag. |
-| **Index Finger Up Only** | **Right Click** | Keep only your index finger raised (middle, ring, pinky closed). |
+| **Open Palm Movement** | **Move Cursor** | Palm centroid moves the cursor inside the central **Active Zone**. |
+| **Index Air Tap** | **Left Click** | Open hand, bend/tap your index finger down (like clicking a real mouse button). |
+| **Pinch (Thumb + Index)** | **Drag & Drop** | Pinch thumb and index together to grab & drag; open fingers to release/drop. |
+| **Index Finger Pointing Up** | **Right Click** | Keep only your index finger raised (middle, ring, pinky closed). |
 | **Ring Finger Up Only** | **Windows Start Menu** | Raise only the ring finger to trigger the <kbd>Win</kbd> key. |
 | **Closed Fist (Hold 2.5s)** | **Close Window (Alt + F4)** | Make a closed fist and hold for 2.5 seconds to close the active application. |
 
@@ -96,9 +100,14 @@ Or run directly using the `.venv` executable without activation:
 
 ---
 
-## Configuration & Tuning
+## Live Sensitivity & Tuning Controls
 
-You can adjust parameters at the top of `main.py`:
+AirGlide features **interactive GUI drag bars** on top of the camera preview window for tuning settings on the fly:
+
+- **Sensitivity Slider (1 to 100)**: Drag to instantly scale your cursor sensitivity. As you drag the bar, the green **Active Zone** box expands or contracts live on the video feed so you can see your exact full-screen hand boundaries.
+- **Deadzone Slider (1 to 10)**: Drag to eliminate any minor hand tremors or jitter when holding your hand still.
+
+You can also adjust default startup parameters in `main.py`:
 
 ```python
 # ==========================
@@ -106,10 +115,9 @@ You can adjust parameters at the top of `main.py`:
 # ==========================
 SHOW_PREVIEW = True     # Set False to run headless in the background without a window
 CAM_W, CAM_H = 640, 360 # Camera resolution (lower resolution = faster processing)
-DEADZONE = 2            # Movement threshold in pixels before cursor updates
-EDGE_PADDING = 30       # Boundary margin to easily reach screen corners
-PINCH_DIST = 42         # Pixel threshold for index-thumb pinch click detection
-COOLDOWN = 0.4          # Minimum cooldown seconds between discrete gesture triggers
+DEADZONE = 2            # Default movement threshold in pixels before cursor updates
+PINCH_DIST = 40         # Distance in pixels between thumb & index to trigger Drag & Drop
+COOLDOWN = 0.35         # Minimum cooldown seconds between discrete gesture triggers
 FIST_HOLD_TIME = 2.5    # Seconds required to hold a fist to trigger Alt+F4
 ```
 
